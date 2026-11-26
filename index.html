@@ -1,0 +1,834 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Loves Me, Loves Me Not - Peony</title>
+<style>
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  html, body { height: 100%; }
+  body {
+    background-color: #28152e;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    overflow: hidden;
+    touch-action: manipulation;
+  }
+  canvas {
+    image-rendering: -moz-crisp-edges;
+    image-rendering: -webkit-crisp-edges;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    box-shadow: 0 16px 50px rgba(0, 0, 0, 0.8);
+    border: 4px solid #5c3a55;
+    border-radius: 6px;
+    cursor: pointer;
+    width: min(94vw, 71.25vh);
+    height: min(95vh, 125.33vw);
+    aspect-ratio: 180 / 240;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="game" width="180" height="240"></canvas>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+const W = 180;
+const H = 240;
+const CX = 90;
+const CY = 108;
+const STEM_BOTTOM = { x: 90, y: 208 };
+
+const LOVES_COLOR = '#ff8fc0';
+const NOT_COLOR   = '#a9bcff';
+const IDLE_COLOR  = '#c0e024';
+
+const MOON_X = 142;
+const MOON_Y = 58;
+const MOON_R = 12;
+
+// Bayer 4x4 dithering matrix
+const BAYER = [
+  [0,  8,  2, 10],
+  [12, 4, 14,  6],
+  [3, 11,  1,  9],
+  [15, 7, 13,  5]
+];
+
+// 5x7 Pixel Font for crisp retro text
+const PIXEL_FONT = {
+  'L': ["10000","10000","10000","10000","10000","10000","11111"],
+  'O': ["01110","10001","10001","10001","10001","10001","01110"],
+  'V': ["10001","10001","10001","10001","10001","01010","00100"],
+  'E': ["11111","10000","10000","11110","10000","10000","11111"],
+  'H': ["10001","10001","10001","11111","10001","10001","10001"],
+  'S': ["01111","10000","10000","01110","00001","00001","11110"],
+  'M': ["10001","11011","10101","10101","10001","10001","10001"],
+  'N': ["10001","11001","10101","10011","10001","10001","10001"],
+  'T': ["11111","00100","00100","00100","00100","00100","00100"],
+  '!': ["00100","00100","00100","00100","00100","00000","00100"],
+  ' ': ["00000","00000","00000","00000","00000","00000","00000"]
+};
+
+function drawPixelText(text, centerX, y, color, scale = 2) {
+  const upper = text.toUpperCase();
+  const charW = 5 * scale;
+  const spacing = 1 * scale;
+  const totalW = upper.length * charW + (upper.length - 1) * spacing;
+  let startX = Math.round(centerX - totalW / 2);
+
+  for (let i = 0; i < upper.length; i++) {
+    const glyph = PIXEL_FONT[upper[i]] || PIXEL_FONT[' '];
+    for (let r = 0; r < 7; r++) {
+      for (let c = 0; c < 5; c++) {
+        if (glyph[r][c] === '1') {
+          ctx.fillStyle = '#090b26';
+          ctx.fillRect(startX + c * scale + 1, y + r * scale + 1, scale, scale);
+          ctx.fillStyle = color;
+          ctx.fillRect(startX + c * scale, y + r * scale, scale, scale);
+        }
+      }
+    }
+    startX += charW + spacing;
+  }
+}
+
+function lerpColor(a, b, t) {
+  return [
+    Math.round(a[0] + (b[0] - a[0]) * t),
+    Math.round(a[1] + (b[1] - a[1]) * t),
+    Math.round(a[2] + (b[2] - a[2]) * t)
+  ];
+}
+
+// Pre-render static background with dithered sky, hills, and ground
+const bgCanvas = document.createElement('canvas');
+bgCanvas.width = W;
+bgCanvas.height = H;
+const bgCtx = bgCanvas.getContext('2d');
+
+function buildBackground() {
+  const imgData = bgCtx.createImageData(W, H);
+  const data = imgData.data;
+  const top = [54, 25, 62];
+  const bottom = [226, 130, 170];
+  const bands = 7;
+
+  for (let y = 0; y < H; y++) {
+    const t = Math.min(1.0, y / (H * 0.8));
+    const v = t * bands;
+    const i = Math.floor(v);
+    const frac = v - i;
+    for (let x = 0; x < W; x++) {
+      const k = i + (frac > BAYER[y % 4][x % 4] / 16 ? 1 : 0);
+      const [r, g, b] = lerpColor(top, bottom, Math.min(k, bands) / bands);
+      const idx = (y * W + x) * 4;
+      data[idx] = r;
+      data[idx + 1] = g;
+      data[idx + 2] = b;
+      data[idx + 3] = 255;
+    }
+  }
+  bgCtx.putImageData(imgData, 0, 0);
+
+  // Distant hills
+  for (let x = 0; x < W; x++) {
+    const y1 = Math.floor(172 + 9 * Math.sin(x * 0.035) + 5 * Math.sin(x * 0.09 + 1));
+    bgCtx.fillStyle = '#4a2d56';
+    bgCtx.fillRect(x, y1, 1, H - y1);
+
+    const y2 = Math.floor(190 + 4 * Math.sin(x * 0.06 + 2));
+    bgCtx.fillStyle = '#144632';
+    bgCtx.fillRect(x, y2, 1, H - y2);
+  }
+
+  // Ground
+  bgCtx.fillStyle = '#1e5a28';
+  bgCtx.fillRect(0, 200, W, H - 200);
+}
+buildBackground();
+
+// Floating heart-bubble state (Sanji heart-eyes style around the moon)
+let heartBubbles = [];
+let heartSpawnTimer = 0;
+
+function spawnMoonHeartBubble() {
+  const angle = -Math.PI * 0.15 - Math.random() * Math.PI * 0.85; // upper/side arc around moon
+  const dist = MOON_R + 3 + Math.random() * 6;
+  const startX = MOON_X + Math.cos(angle) * dist;
+  const startY = MOON_Y + Math.sin(angle) * dist;
+
+  heartBubbles.push({
+    x: startX,
+    y: startY,
+    vx: Math.cos(angle) * (6 + Math.random() * 8),
+    vy: -11 - Math.random() * 9,
+    swayPhase: Math.random() * Math.PI * 2,
+    age: 0,
+    maxAge: 0.75 + Math.random() * 0.55,
+    popped: false,
+    popTimer: 0
+  });
+}
+
+function drawMiniHeartBubble(x, y, age, maxAge) {
+  const hx = Math.round(x);
+  const hy = Math.round(y);
+  const ratio = age / maxAge;
+
+  // 7x6 pixel heart bubble with glossy bubble highlight
+  const grid = [
+    "0110110",
+    "1231221",
+    "1322221",
+    "0122210",
+    "0012100",
+    "0001000"
+  ];
+
+  // Expand slightly just before popping
+  const scale = ratio > 0.82 ? 2 : 1;
+  const ox = hx - Math.floor((7 * scale) / 2);
+  const oy = hy - Math.floor((6 * scale) / 2);
+
+  for (let r = 0; r < grid.length; r++) {
+    for (let c = 0; c < grid[r].length; c++) {
+      const ch = grid[r][c];
+      if (ch === '0') continue;
+      if (ch === '1') ctx.fillStyle = '#3b1330';
+      else if (ch === '2') ctx.fillStyle = '#ff5c9d';
+      else if (ch === '3') ctx.fillStyle = '#ffffff';
+      ctx.fillRect(ox + c * scale, oy + r * scale, scale, scale);
+    }
+  }
+}
+
+function drawPopBurst(x, y, popTimer) {
+  const px = Math.round(x);
+  const py = Math.round(y);
+  const d = Math.round(2 + popTimer * 24);
+  ctx.fillStyle = '#ff99c8';
+  ctx.fillRect(px - d, py, 1, 1);
+  ctx.fillRect(px + d, py, 1, 1);
+  ctx.fillRect(px, py - d, 1, 1);
+  ctx.fillRect(px, py + d, 1, 1);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(px - d + 1, py - d + 1, 1, 1);
+  ctx.fillRect(px + d - 1, py - d + 1, 1, 1);
+}
+
+// Draw dithered moon + reactive expression (😍 with continuous heart bubbles vs teary sad face)
+function drawMoon(mood, time) {
+  const bob = Math.round(Math.sin(time * 2.2) * 1.0);
+  const mx = MOON_X;
+  const my = MOON_Y + bob;
+
+  for (let dy = -MOON_R - 3; dy <= MOON_R + 3; dy++) {
+    for (let dx = -MOON_R - 3; dx <= MOON_R + 3; dx++) {
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const px = mx + dx;
+      const py = my + dy;
+      if (dist <= MOON_R - 1) {
+        ctx.fillStyle = '#fff8c9';
+        ctx.fillRect(px, py, 1, 1);
+      } else if (dist <= MOON_R + 2) {
+        const edgeFrac = 1 - (dist - (MOON_R - 1)) / 3;
+        if (edgeFrac > BAYER[py & 3][px & 3] / 16) {
+          ctx.fillStyle = '#e8df9e';
+          ctx.fillRect(px, py, 1, 1);
+        }
+      }
+    }
+  }
+
+  // 5x4 pixel heart eye sprite for 😍
+  const tinyHeart = [
+    "01010",
+    "11111",
+    "11111",
+    "01110"
+  ];
+
+  const drawHeartEye = (cx, cy) => {
+    for (let r = 0; r < 4; r++) {
+      for (let c = 0; c < 5; c++) {
+        if (tinyHeart[r][c] === '1') {
+          ctx.fillStyle = '#ff3b7f';
+          ctx.fillRect(cx - 2 + c, cy - 2 + r, 1, 1);
+        }
+      }
+    }
+  };
+
+  if (mood === 'loves') {
+    // 😍 Heart eyes + rosy cheeks + happy smile
+    drawHeartEye(mx - 5, my - 2);
+    drawHeartEye(mx + 5, my - 2);
+
+    ctx.fillStyle = '#ff8fc0';
+    ctx.fillRect(mx - 8, my + 2, 2, 1);
+    ctx.fillRect(mx + 7, my + 2, 2, 1);
+
+    ctx.fillStyle = '#5c3b1e';
+    ctx.fillRect(mx - 2, my + 5, 1, 1);
+    ctx.fillRect(mx - 1, my + 6, 3, 1);
+    ctx.fillRect(mx + 2, my + 5, 1, 1);
+  } else if (mood === 'not') {
+    // Teary crying sad face
+    ctx.fillStyle = '#3d4885';
+    ctx.fillRect(mx - 5, my - 2, 2, 2);
+    ctx.fillRect(mx + 4, my - 2, 2, 2);
+
+    ctx.fillRect(mx - 6, my - 4, 2, 1);
+    ctx.fillRect(mx - 4, my - 3, 1, 1);
+    ctx.fillRect(mx + 5, my - 4, 2, 1);
+    ctx.fillRect(mx + 4, my - 3, 1, 1);
+
+    ctx.fillRect(mx - 2, my + 6, 1, 1);
+    ctx.fillRect(mx - 1, my + 5, 3, 1);
+    ctx.fillRect(mx + 2, my + 6, 1, 1);
+
+    const dropCycle1 = (time * 3.2) % 1;
+    const dropCycle2 = ((time * 3.2) + 0.5) % 1;
+
+    const drawTear = (tx, baseY, progress) => {
+      const ty = Math.round(baseY + progress * 11);
+      ctx.fillStyle = '#7dd3fc';
+      ctx.fillRect(tx, ty, 2, 2);
+      ctx.fillRect(tx, ty + 2, 1, 1);
+      ctx.fillStyle = '#e0f2fe';
+      ctx.fillRect(tx, ty, 1, 1);
+    };
+
+    drawTear(mx - 5, my + 1, dropCycle1);
+    drawTear(mx + 4, my + 1, dropCycle2);
+  } else {
+    // Calm idle face before plucking
+    ctx.fillStyle = '#6e5a3a';
+    ctx.fillRect(mx - 5, my - 2, 2, 2);
+    ctx.fillRect(mx + 4, my - 2, 2, 2);
+    ctx.fillRect(mx - 1, my + 4, 3, 1);
+  }
+}
+
+// Deterministic seeded random for stars & grass
+let seed = 4;
+function rand() {
+  seed = (seed * 16807) % 2147483647;
+  return (seed - 1) / 2147483646;
+}
+
+const STARS = Array.from({ length: 45 }, () => ({
+  x: Math.floor(2 + rand() * (W - 4)),
+  y: Math.floor(2 + rand() * 118),
+  phase: rand() * Math.PI * 2
+}));
+
+const GRASS_COLORS = ['#3c963c', '#287832', '#5ab446'];
+const GRASS = Array.from({ length: 55 }, () => ({
+  x: Math.floor(rand() * W),
+  y: Math.floor(194 + rand() * 38),
+  h: Math.floor(3 + rand() * 6),
+  color: GRASS_COLORS[Math.floor(rand() * GRASS_COLORS.length)],
+  phase: rand() * Math.PI * 2
+}));
+
+// Peony palette: 3 layers, each with 5 tones from the dark base to a pale rim
+const PEONY_PALETTES = [
+  { deep: '#9c3b68', shadow: '#c95b86', base: '#f291b5', mid: '#ffc2d9', edge: '#fff0f6' },
+  { deep: '#7a1f4a', shadow: '#a83261', base: '#e0568c', mid: '#ff8fb8', edge: '#ffd9e8' },
+  { deep: '#5c1236', shadow: '#8c1d4a', base: '#c93872', mid: '#f5699e', edge: '#ffb3d0' }
+];
+
+// Game State
+let petals = [];
+let fallingPetals = [];
+let groundPetals = [];
+let particles = [];
+let statusText = '';
+let statusColor = IDLE_COLOR;
+let moonMood = 'idle'; // 'idle' | 'loves' | 'not'
+let shakeTimer = 0;
+let finishTimer = 0;
+let isFinished = false;
+
+function initGame() {
+  petals = [];
+  const layers = [
+    { count: 7, radius: 13, w: 18, h: 17, offset: 0 },
+    { count: 6, radius: 9,  w: 15, h: 14, offset: 0.35 },
+    { count: 4, radius: 5,  w: 12, h: 11, offset: 0.7 }
+  ];
+
+  layers.forEach((cfg, layerIdx) => {
+    for (let i = 0; i < cfg.count; i++) {
+      petals.push({
+        layer: layerIdx,
+        angle: (i / cfg.count) * Math.PI * 2 - Math.PI / 2 + cfg.offset,
+        radius: cfg.radius,
+        w: cfg.w,
+        h: cfg.h,
+        plucked: false
+      });
+    }
+  });
+
+  fallingPetals = [];
+  groundPetals = [];
+  particles = [];
+  heartBubbles = [];
+  heartSpawnTimer = 0;
+  statusText = '';
+  statusColor = IDLE_COLOR;
+  moonMood = 'idle';
+  shakeTimer = 0;
+  finishTimer = 0;
+  isFinished = false;
+}
+
+function pluckPetal() {
+  if (isFinished) {
+    if (finishTimer > 1.2) initGame();
+    return;
+  }
+
+  const remaining = petals.filter(p => !p.plucked);
+  if (remaining.length === 0) return;
+
+  const minLayer = Math.min(...remaining.map(p => p.layer));
+  const outerCandidates = remaining.filter(p => p.layer === minLayer);
+  const chosen = outerCandidates[Math.floor(Math.random() * outerCandidates.length)];
+  chosen.plucked = true;
+
+  const newRemaining = remaining.length - 1;
+  const isLovesMe = (newRemaining % 2 === 0);
+
+  statusText = newRemaining === 0 ? 'SHE LOVES ME!' : (isLovesMe ? 'SHE LOVES ME' : 'SHE LOVES ME NOT');
+  statusColor = isLovesMe ? LOVES_COLOR : NOT_COLOR;
+  moonMood = isLovesMe ? 'loves' : 'not';
+  shakeTimer = 0.25;
+
+  if (isLovesMe && heartBubbles.length < 2) {
+    spawnMoonHeartBubble();
+  }
+
+  const px = CX + Math.cos(chosen.angle) * (chosen.radius + 6);
+  const py = CY + Math.sin(chosen.angle) * (chosen.radius + 6);
+
+  const side = Math.cos(chosen.angle) >= 0 ? 1 : -1;
+  const targetX = Math.max(18, Math.min(W - 18, CX + side * (16 + Math.random() * 54) + (Math.random() - 0.5) * 18));
+  const targetY = Math.round(202 + Math.random() * 24);
+
+  fallingPetals.push({
+    x: px,
+    y: py,
+    vx: (targetX - px) * 0.75,
+    vy: -18 + Math.sin(chosen.angle) * 6,
+    targetY: targetY,
+    angle: chosen.angle,
+    spin: (Math.random() - 0.5) * 4.5,
+    swayPhase: Math.random() * Math.PI * 2,
+    layer: chosen.layer
+  });
+
+  for (let i = 0; i < 6; i++) {
+    particles.push({
+      x: px,
+      y: py,
+      vx: (Math.random() - 0.5) * 35,
+      vy: (Math.random() - 0.5) * 35,
+      life: 0.5 + Math.random() * 0.3,
+      color: statusColor
+    });
+  }
+
+  if (newRemaining === 0) {
+    isFinished = true;
+    finishTimer = 0;
+    for (let i = 0; i < 24; i++) {
+      const a = (i / 24) * Math.PI * 2;
+      const spd = 20 + Math.random() * 35;
+      particles.push({
+        x: CX,
+        y: CY - 10,
+        vx: Math.cos(a) * spd,
+        vy: Math.sin(a) * spd - 15,
+        life: 1.0 + Math.random() * 0.6,
+        color: i % 2 === 0 ? '#ff8fc0' : '#fff380'
+      });
+    }
+  }
+}
+
+// Soft, cupped peony petal: narrow at the base, broad and rounded at the
+// tip with a small cleft, dithered shading, fine veins and a pale rim.
+function drawPeonyPetal(cx, cy, angle, radius, w, h, layerIdx) {
+  const pal = PEONY_PALETTES[layerIdx];
+  const tones = [pal.deep, pal.shadow, pal.base, pal.mid, pal.edge];
+  const ca = Math.cos(angle);
+  const sa = Math.sin(angle);
+  const halfH = h / 2;
+  const step = 0.5; // oversample so rotated petals have no gaps
+
+  for (let u = 0; u <= w; u += step) {
+    const t = u / w;
+    const body = 0.34 + 0.66 * Math.sin(Math.min(1, t * 1.15) * Math.PI / 2);
+    let hw = halfH * body;
+    if (t > 0.74) {
+      const k = (t - 0.74) / 0.26;
+      hw *= Math.sqrt(Math.max(0, 1 - k * k * 0.92));
+    }
+    if (hw < 0.4) continue;
+
+    for (let v = -hw; v <= hw; v += step) {
+      const av = Math.abs(v);
+      // small cleft at the tip
+      if (t > 0.84 && av < 1.1) continue;
+
+      const nv = av / hw;
+      const rim = hw - av < 1.1;
+
+      const wx = cx + (radius + u) * ca - v * sa;
+      const wy = cy + (radius + u) * sa + v * ca;
+      const px = Math.round(wx);
+      const py = Math.round(wy);
+
+      // shade: dark at the base, brighter toward the tip, a little lift at the sides
+      let s = 0.12 + t * 0.78 + (nv > 0.6 ? (nv - 0.6) * 0.35 : 0);
+
+      // veins fanning out from the base
+      if (t > 0.12 && t < 0.82) {
+        const veinPos = halfH * body * 0.48;
+        if (av < 0.55 || Math.abs(av - veinPos) < 0.5) s -= 0.2;
+      }
+      // soft highlight patch on the upper half of the petal
+      if (v < 0 && t > 0.4 && t < 0.85 && nv < 0.55) s += 0.12;
+
+      let color;
+      if (rim && t > 0.18) {
+        color = (t > 0.5 && v < 0) ? pal.edge : pal.shadow;
+      } else {
+        const k = Math.max(0, Math.min(3.99, s * 4));
+        const lo = Math.floor(k);
+        const bump = (k - lo) > BAYER[py & 3][px & 3] / 16 ? 1 : 0;
+        color = tones[Math.min(4, lo + bump)];
+      }
+      ctx.fillStyle = color;
+      ctx.fillRect(px, py, 1, 1);
+    }
+  }
+}
+
+// A petal lying on the grass: a little lens with a vein and a soft shadow
+function drawGroundPetal(gp) {
+  const pal = PEONY_PALETTES[gp.layer];
+  const gx = Math.round(gp.x);
+  const gy = Math.round(gp.y);
+
+  ctx.fillStyle = '#123b19';
+  ctx.fillRect(gx - 5, gy + 2, 11, 1);
+  ctx.fillRect(gx - 3, gy + 3, 7, 1);
+
+  for (let dy = -3; dy <= 2; dy++) {
+    for (let dx = -6; dx <= 6; dx++) {
+      const e = (dx * dx) / 36 + ((dy + 0.5) * (dy + 0.5)) / 7;
+      if (e > 1) continue;
+      let c;
+      if (e > 0.72) c = (dx > 1 && dy < 0) ? pal.edge : pal.shadow;
+      else if (dy === 0 && dx > -4 && dx < 3) c = pal.base;
+      else c = dx > 1 ? pal.mid : pal.base;
+      ctx.fillStyle = c;
+      ctx.fillRect(gx + dx, gy + dy, 1, 1);
+    }
+  }
+}
+
+function drawHeartBubble(x, y) {
+  const bx = Math.round(x);
+  const by = Math.round(y);
+  const FILL = '#ffc2d9';
+  const LINE = '#7a1f4a';
+
+  ctx.fillStyle = FILL;
+  ctx.fillRect(bx - 15, by - 13, 30, 22);
+  ctx.fillRect(bx - 17, by - 11, 34, 18);
+
+  ctx.fillStyle = LINE;
+  ctx.fillRect(bx - 15, by - 14, 30, 1);
+  ctx.fillRect(bx - 15, by + 9, 30, 1);
+  ctx.fillRect(bx - 18, by - 11, 1, 18);
+  ctx.fillRect(bx + 17, by - 11, 1, 18);
+  ctx.fillRect(bx - 17, by - 13, 2, 2);
+  ctx.fillRect(bx + 15, by - 13, 2, 2);
+  ctx.fillRect(bx - 17, by + 7, 2, 2);
+  ctx.fillRect(bx + 15, by + 7, 2, 2);
+
+  ctx.fillStyle = FILL;
+  ctx.fillRect(bx - 3, by + 9, 6, 3);
+  ctx.fillRect(bx - 1, by + 12, 3, 2);
+  ctx.fillStyle = LINE;
+  ctx.fillRect(bx - 4, by + 10, 1, 2);
+  ctx.fillRect(bx - 2, by + 12, 1, 2);
+  ctx.fillRect(bx + 3, by + 10, 1, 2);
+  ctx.fillRect(bx + 1, by + 12, 1, 2);
+  ctx.fillRect(bx - 1, by + 14, 2, 1);
+
+  const heart = [
+    "01110001110",
+    "11111011111",
+    "11211111111",
+    "11111111111",
+    "11111111111",
+    "01111111110",
+    "00111111100",
+    "00011111000",
+    "00001110000",
+    "00000100000"
+  ];
+
+  const heartX = bx - 5;
+  const heartY = by - 7;
+  for (let row = 0; row < heart.length; row++) {
+    for (let column = 0; column < heart[row].length; column++) {
+      const pixel = heart[row][column];
+      if (pixel === '1') {
+        ctx.fillStyle = '#e0245e';
+        ctx.fillRect(heartX + column, heartY + row, 1, 1);
+      } else if (pixel === '2') {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(heartX + column, heartY + row, 1, 1);
+      }
+    }
+  }
+}
+
+let lastTime = performance.now();
+
+function loop(now) {
+  const dt = Math.min(0.05, (now - lastTime) / 1000);
+  lastTime = now;
+  const time = now / 1000;
+
+  if (shakeTimer > 0) shakeTimer = Math.max(0, shakeTimer - dt);
+  if (isFinished) finishTimer += dt;
+
+  // Continuously spawn & pop heart bubbles around the moon while in "loves" mode
+  if (moonMood === 'loves') {
+    heartSpawnTimer -= dt;
+    if (heartSpawnTimer <= 0) {
+      spawnMoonHeartBubble();
+      heartSpawnTimer = 0.28 + Math.random() * 0.22;
+    }
+  }
+
+  ctx.drawImage(bgCanvas, 0, 0);
+
+  STARS.forEach(s => {
+    const twinkle = Math.sin(time * 2.5 + s.phase);
+    if (twinkle > -0.3) {
+      ctx.fillStyle = twinkle > 0.5 ? '#ffffff' : '#9aa8e8';
+      ctx.fillRect(s.x, s.y, 1, 1);
+      if (twinkle > 0.85) {
+        ctx.fillStyle = 'rgba(255,255,255,0.4)';
+        ctx.fillRect(s.x - 1, s.y, 3, 1);
+        ctx.fillRect(s.x, s.y - 1, 1, 3);
+      }
+    }
+  });
+
+  drawMoon(moonMood, time);
+
+  // Update & draw floating heart bubbles around the moon
+  for (let i = heartBubbles.length - 1; i >= 0; i--) {
+    const hb = heartBubbles[i];
+    if (!hb.popped) {
+      hb.age += dt;
+      hb.x += (hb.vx + Math.sin(time * 7 + hb.swayPhase) * 10) * dt;
+      hb.y += hb.vy * dt;
+
+      if (hb.age >= hb.maxAge) {
+        hb.popped = true;
+        hb.popTimer = 0;
+      } else {
+        drawMiniHeartBubble(hb.x, hb.y, hb.age, hb.maxAge);
+      }
+    } else {
+      hb.popTimer += dt;
+      drawPopBurst(hb.x, hb.y, hb.popTimer);
+      if (hb.popTimer > 0.16) {
+        heartBubbles.splice(i, 1);
+      }
+    }
+  }
+
+  groundPetals.forEach(gp => drawGroundPetal(gp));
+
+  const shakeOffset = shakeTimer > 0 ? Math.sin(time * 55) * 2.5 * (shakeTimer / 0.25) : 0;
+  const windSway = Math.sin(time * 1.6) * 2.5 + shakeOffset;
+  const headX = CX + windSway;
+  const headY = CY + Math.abs(windSway) * 0.15;
+
+  ctx.fillStyle = '#2e7d32';
+  for (let y = Math.round(headY); y <= STEM_BOTTOM.y; y++) {
+    const progress = (y - headY) / (STEM_BOTTOM.y - headY);
+    const sx = Math.round(headX * (1 - progress) + STEM_BOTTOM.x * progress);
+    ctx.fillRect(sx - 2, y, 4, 1);
+    ctx.fillStyle = '#66bb6a';
+    ctx.fillRect(sx - 1, y, 1, 1);
+    ctx.fillStyle = '#2e7d32';
+  }
+
+  const hx = Math.round(headX);
+  const hy = Math.round(headY);
+  const leafY = Math.round((headY + STEM_BOTTOM.y) * 0.55);
+  const leafX = Math.round((headX + STEM_BOTTOM.x) * 0.5);
+
+  ctx.fillStyle = '#2e7d32';
+  ctx.fillRect(leafX - 13, leafY - 3, 11, 3);
+  ctx.fillRect(leafX - 18, leafY - 6, 7, 3);
+  ctx.fillRect(leafX - 15, leafY + 1, 8, 3);
+  ctx.fillStyle = '#66bb6a';
+  ctx.fillRect(leafX - 16, leafY - 5, 5, 1);
+  ctx.fillRect(leafX - 13, leafY + 1, 5, 1);
+
+  ctx.fillStyle = '#2e7d32';
+  ctx.fillRect(leafX + 2, leafY + 2, 11, 3);
+  ctx.fillRect(leafX + 11, leafY - 1, 7, 3);
+  ctx.fillRect(leafX + 8, leafY + 6, 8, 3);
+  ctx.fillStyle = '#66bb6a';
+  ctx.fillRect(leafX + 12, leafY, 5, 1);
+  ctx.fillRect(leafX + 9, leafY + 6, 5, 1);
+
+  for (let layer = 0; layer <= 2; layer++) {
+    petals.forEach((p, idx) => {
+      if (!p.plucked && p.layer === layer) {
+        const flutter = Math.sin(time * 2.0 + idx) * 0.025;
+        drawPeonyPetal(headX, headY, p.angle + flutter, p.radius, p.w, p.h, p.layer);
+      }
+    });
+  }
+
+  ctx.fillStyle = '#d97706';
+  ctx.fillRect(hx - 7, hy - 7, 14, 14);
+  ctx.fillRect(hx - 9, hy - 5, 18, 10);
+  ctx.fillRect(hx - 5, hy - 9, 10, 18);
+
+  ctx.fillStyle = '#fbbf24';
+  ctx.fillRect(hx - 6, hy - 6, 12, 12);
+  ctx.fillRect(hx - 7, hy - 4, 14, 8);
+  ctx.fillRect(hx - 4, hy - 7, 8, 14);
+
+  if (isFinished) {
+    ctx.fillStyle = '#4a2500';
+    ctx.fillRect(hx - 4, hy - 2, 2, 1);
+    ctx.fillRect(hx - 5, hy - 1, 1, 1);
+    ctx.fillRect(hx - 2, hy - 1, 1, 1);
+
+    ctx.fillRect(hx + 2, hy - 2, 2, 1);
+    ctx.fillRect(hx + 1, hy - 1, 1, 1);
+    ctx.fillRect(hx + 4, hy - 1, 1, 1);
+
+    ctx.fillStyle = '#ff4d8d';
+    ctx.fillRect(hx - 6, hy + 1, 2, 1);
+    ctx.fillRect(hx + 4, hy + 1, 2, 1);
+
+    ctx.fillStyle = '#4a2500';
+    ctx.fillRect(hx - 1, hy + 2, 2, 1);
+  } else {
+    ctx.fillStyle = '#fef08a';
+    ctx.fillRect(hx - 4, hy - 4, 2, 2);
+    ctx.fillRect(hx + 2, hy - 3, 2, 2);
+    ctx.fillRect(hx - 2, hy + 2, 2, 2);
+    ctx.fillRect(hx + 3, hy + 2, 2, 2);
+    ctx.fillRect(hx, hy - 1, 2, 2);
+  }
+
+  for (let i = fallingPetals.length - 1; i >= 0; i--) {
+    const fp = fallingPetals[i];
+    fp.vy += 32 * dt;
+    fp.vx *= 0.985;
+    fp.x += (fp.vx + Math.sin(time * 3.8 + fp.swayPhase) * 16) * dt;
+    fp.y += fp.vy * dt;
+    fp.angle += fp.spin * dt;
+
+    fp.x = Math.max(14, Math.min(W - 14, fp.x));
+
+    if (fp.y >= fp.targetY) {
+      groundPetals.push({
+        x: fp.x,
+        y: fp.targetY,
+        layer: fp.layer
+      });
+      groundPetals.sort((a, b) => a.y - b.y);
+      fallingPetals.splice(i, 1);
+    } else {
+      drawPeonyPetal(fp.x, fp.y, fp.angle, 0, 12, 11, fp.layer);
+    }
+  }
+
+  GRASS.forEach(g => {
+    const sway = Math.round(Math.sin(time * 2 + g.phase) * 1.2);
+    ctx.fillStyle = g.color;
+    ctx.fillRect(g.x, g.y - g.h, 1, g.h);
+    ctx.fillRect(g.x + sway, g.y - g.h - 1, 1, 2);
+  });
+
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const pt = particles[i];
+    pt.x += pt.vx * dt;
+    pt.y += pt.vy * dt;
+    pt.vy += 20 * dt;
+    pt.life -= dt;
+    if (pt.life <= 0) {
+      particles.splice(i, 1);
+    } else {
+      ctx.fillStyle = pt.color;
+      ctx.fillRect(Math.round(pt.x), Math.round(pt.y), 2, 2);
+    }
+  }
+
+  if (isFinished) {
+    const bob = Math.sin(time * 3.5) * 2.5;
+    drawHeartBubble(headX, headY - 30 + bob);
+  }
+
+  if (statusText) {
+    const scale = statusText.length > 10 ? 1 : 2;
+    const textY = statusText.length > 10 ? 18 : 14;
+    drawPixelText(statusText, W / 2, textY, statusColor, scale);
+  }
+
+  requestAnimationFrame(loop);
+}
+
+canvas.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  pluckPetal();
+});
+
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space') {
+    e.preventDefault();
+    pluckPetal();
+  } else if (e.code === 'KeyR') {
+    initGame();
+  }
+});
+
+initGame();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
